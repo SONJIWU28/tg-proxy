@@ -17,12 +17,10 @@ import com.tgwsproxy.databinding.ActivityMainBinding
 import com.tgwsproxy.vpn.TgVpnService
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: MainViewModel
     private val handler = Handler(Looper.getMainLooper())
 
-    // VPN permission request
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -34,14 +32,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Notification permission request (Android 13+)
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (!granted) {
-            Toast.makeText(this,
+            Toast.makeText(
+                this,
                 "Уведомления отключены. Прокси будет работать, но без статуса в шторке.",
-                Toast.LENGTH_LONG).show()
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -83,17 +82,23 @@ class MainActivity : AppCompatActivity() {
         viewModel.isRunning.observe(this) { running ->
             binding.btnToggle.text = if (running) "ОСТАНОВИТЬ" else "ЗАПУСТИТЬ"
             binding.btnToggle.setBackgroundColor(
-                ContextCompat.getColor(this,
-                    if (running) R.color.stop_red else R.color.tg_blue)
+                ContextCompat.getColor(
+                    this,
+                    if (running) R.color.stop_red else R.color.tg_blue
+                )
             )
             binding.tvStatus.text = if (running) "Активен" else "Отключён"
             binding.tvStatus.setTextColor(
-                ContextCompat.getColor(this,
-                    if (running) R.color.status_active else R.color.status_inactive)
+                ContextCompat.getColor(
+                    this,
+                    if (running) R.color.status_active else R.color.status_inactive
+                )
             )
             binding.ivStatusDot.setColorFilter(
-                ContextCompat.getColor(this,
-                    if (running) R.color.status_active else R.color.status_inactive)
+                ContextCompat.getColor(
+                    this,
+                    if (running) R.color.status_active else R.color.status_inactive
+                )
             )
         }
 

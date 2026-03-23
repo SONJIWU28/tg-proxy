@@ -1,16 +1,10 @@
 package com.tgwsproxy.proxy
-
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * Thread-safe statistics tracker for the proxy.
- * Exposes LiveData for real-time UI updates.
- */
 object ProxyStats {
-
     private val _connectionsTotal = AtomicInteger(0)
     private val _connectionsWs = AtomicInteger(0)
     private val _connectionsTcpFallback = AtomicInteger(0)
@@ -19,7 +13,6 @@ object ProxyStats {
     private val _bytesUp = AtomicLong(0)
     private val _bytesDown = AtomicLong(0)
 
-    // LiveData for UI observation
     private val _statsLive = MutableLiveData<Snapshot>()
     val statsLive: LiveData<Snapshot> = _statsLive
 
@@ -70,14 +63,12 @@ object ProxyStats {
 
     fun addBytesUp(n: Long) {
         _bytesUp.addAndGet(n)
-        // Don't notify on every byte — too frequent
     }
 
     fun addBytesDown(n: Long) {
         _bytesDown.addAndGet(n)
     }
 
-    /** Call periodically (e.g. every 1s) to push byte counters to LiveData */
     fun publishTrafficUpdate() {
         notifyChanged()
     }

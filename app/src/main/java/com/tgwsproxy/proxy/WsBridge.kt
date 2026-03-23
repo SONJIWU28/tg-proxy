@@ -1,5 +1,4 @@
 package com.tgwsproxy.proxy
-
 import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -10,27 +9,12 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
-/**
- * Core TCP ↔ WebSocket bridge for Telegram traffic.
- *
- * Architecture:
- * ┌─────────────┐       ┌──────────────┐       ┌──────────────┐
- * │  TUN device  │──TCP──│  LocalProxy   │──WSS──│  Telegram DC │
- * │  (VpnService)│       │  (this class) │       │  (kws*.tg)   │
- * └─────────────┘       └──────────────┘       └──────────────┘
- *
- * For each Telegram TCP connection coming from the TUN:
- * 1. Read the 64-byte MTProto init packet
- * 2. Extract DC ID and media flag
- * 3. Connect via WSS to the appropriate kws domain
- * 4. Bridge bidirectionally: TCP→WS and WS→TCP
- * 5. If WS fails, fall back to direct TCP
- */
 class WsBridge(
-    private val dcConfig: Map<Int, String> // dc_id -> target_ip
+    private val dcConfig: Map<Int, String>,
+    private val proxyManager: ProxyManager? = null
 ) {
     companion object {
         private const val TAG = "WsBridge"
@@ -38,40 +22,26 @@ class WsBridge(
         private const val TCP_BUFFER_SIZE = 65536
     }
 
-    // DCs where WS is known to fail (302 redirect) — use TCP fallback
     private val wsBlacklist = ConcurrentHashMap.newKeySet<Pair<Int, Boolean>>()
-
-    // Cooldown tracking for failed WS attempts
     private val dcFailUntil = ConcurrentHashMap<Pair<Int, Boolean>, Long>()
     private val DC_FAIL_COOLDOWN_MS = 30_000L
 
-    // OkHttp client with standard TLS verification
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(WS_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // infinite for WS
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    /**
-     * Handle a new TCP connection from the local proxy server.
-     * This is called for each connection that the SOCKS5/local server accepts.
-     *
-     * @param clientSocket The TCP socket from the local proxy
-     * @param destIp The original destination IP (Telegram DC)
-     * @param destPort The original destination port
-     */
     suspend fun handleConnection(
         clientSocket: Socket,
         destIp: String,
         destPort: Int
     ) {
         val label = "${clientSocket.remoteSocketAddress}"
-
         try {
             val inputStream = clientSocket.getInputStream()
             val outputStream = clientSocket.getOutputStream()
 
-            // Step 1: Read the 64-byte MTProto init packet
             val init = ByteArray(64)
             var read = 0
             while (read < 64) {
@@ -83,12 +53,10 @@ class WsBridge(
                 read += n
             }
 
-            // Step 2: Extract DC ID from init packet
             var initInfo = MtProtoParser.extractDcFromInit(init)
             var initData = init
             var patched = false
 
-            // Android clients with useSecret=0 may have random dc_id — patch it
             if (initInfo == null) {
                 val knownDc = TelegramConstants.IP_TO_DC[destIp]
                 if (knownDc != null && knownDc.dc in dcConfig) {
@@ -110,14 +78,12 @@ class WsBridge(
             val mediaTag = if (isMedia) " media" else ""
             val targetIp = dcConfig[dc]!!
 
-            // Step 3: Check WS blacklist
             if (dcKey in wsBlacklist) {
                 Log.d(TAG, "[$label] DC$dc$mediaTag WS blacklisted → TCP fallback")
                 tcpFallback(inputStream, outputStream, destIp, destPort, initData, label, dc, isMedia)
                 return
             }
 
-            // Step 4: Try WebSocket connection
             val domains = TelegramConstants.wsDomains(dc, isMedia)
             val now = System.currentTimeMillis()
             val failUntil = dcFailUntil[dcKey] ?: 0L
@@ -149,8 +115,14 @@ class WsBridge(
                 }
             }
 
-            // WS failed → fallback
             if (ws == null) {
+                val bestProxy = proxyManager?.getBestProxy(dc)
+                if (bestProxy != null) {
+                    Log.i(TAG, "[$label] Using MTProto proxy: ${bestProxy.ip}:${bestProxy.port}")
+                    connectViaMtProxy(inputStream, outputStream, bestProxy, initData, label)
+                    return
+                }
+
                 if (anyRedirect && allRedirects) {
                     wsBlacklist.add(dcKey)
                     Log.w(TAG, "[$label] DC$dc$mediaTag blacklisted for WS (all 302)")
@@ -163,26 +135,21 @@ class WsBridge(
                 return
             }
 
-            // WS success
             dcFailUntil.remove(dcKey)
             ProxyStats.onConnectionOpened(isWs = true)
 
-            // Create message splitter if we patched the init
             val splitter = if (patched) {
                 try { MsgSplitter(initData) } catch (e: Exception) { null }
             } else null
 
-            // Send the buffered init packet
             ws.send(initData.toByteString())
 
-            // Step 5: Bidirectional bridge
             try {
                 bridgeWs(inputStream, outputStream, ws, wsQueue!!, label, dc, isMedia, splitter)
             } finally {
                 ProxyStats.onConnectionClosed()
                 ws.close(1000, null)
             }
-
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -192,16 +159,11 @@ class WsBridge(
         }
     }
 
-    /**
-     * Connect WebSocket to Telegram DC via OkHttp.
-     * Returns the WebSocket and a blocking queue for received messages.
-     */
     private suspend fun connectWebSocket(
         targetIp: String,
         domain: String,
         timeout: Long
     ): Pair<WebSocket, LinkedBlockingQueue<ByteArray?>> = withContext(Dispatchers.IO) {
-
         val queue = LinkedBlockingQueue<ByteArray?>()
         val openLatch = java.util.concurrent.CountDownLatch(1)
         var connectError: Exception? = null
@@ -212,11 +174,9 @@ class WsBridge(
             .header("Origin", "https://web.telegram.org")
             .header("User-Agent",
                 "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
             .build()
 
-        // OkHttp resolves domain → we need to force it to use targetIp
-        // We achieve this by using a custom DNS that resolves the domain to targetIp
         val client = okHttpClient.newBuilder()
             .dns(object : Dns {
                 override fun lookup(hostname: String): List<java.net.InetAddress> {
@@ -244,7 +204,7 @@ class WsBridge(
                     connectError = Exception("WS failure: ${t.message} (HTTP $code)")
                 }
                 openLatch.countDown()
-                queue.put(null) // signal close
+                queue.put(null)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -257,9 +217,8 @@ class WsBridge(
         }
 
         val ws = client.newWebSocket(request, listener)
-
-        // Wait for connection or timeout
         val opened = openLatch.await(timeout, TimeUnit.MILLISECONDS)
+
         if (!opened) {
             ws.cancel()
             throw Exception("WS connect timeout to $domain")
@@ -273,10 +232,63 @@ class WsBridge(
         ws to queue
     }
 
-    /**
-     * Bidirectional TCP ↔ WebSocket bridge.
-     * Runs two concurrent loops: TCP→WS and WS→TCP.
-     */
+    private suspend fun connectViaMtProxy(
+        clientInput: InputStream,
+        clientOutput: OutputStream,
+        proxy: ProxyServer,
+        initData: ByteArray,
+        label: String
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val remote = Socket()
+            remote.connect(InetSocketAddress(proxy.ip, proxy.port), 10_000)
+            ProxyStats.onConnectionOpened(isWs = false)
+
+            try {
+                val remoteOut = remote.getOutputStream()
+                val remoteIn = remote.getInputStream()
+
+                remoteOut.write(initData)
+                remoteOut.flush()
+
+                coroutineScope {
+                    val up = launch {
+                        try {
+                            val buf = ByteArray(TCP_BUFFER_SIZE)
+                            while (isActive) {
+                                val n = clientInput.read(buf)
+                                if (n < 0) break
+                                ProxyStats.addBytesUp(n.toLong())
+                                remoteOut.write(buf, 0, n)
+                                remoteOut.flush()
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    val down = launch {
+                        try {
+                            val buf = ByteArray(TCP_BUFFER_SIZE)
+                            while (isActive) {
+                                val n = remoteIn.read(buf)
+                                if (n < 0) break
+                                ProxyStats.addBytesDown(n.toLong())
+                                clientOutput.write(buf, 0, n)
+                                clientOutput.flush()
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    select(up, down)
+                    up.cancel()
+                    down.cancel()
+                }
+            } finally {
+                ProxyStats.onConnectionClosed()
+                try { remote.close() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "[$label] MTProto proxy ${proxy.ip}:${proxy.port} failed: ${e.message}")
+        }
+    }
+
     private suspend fun bridgeWs(
         input: InputStream,
         output: OutputStream,
@@ -289,7 +301,6 @@ class WsBridge(
     ) = coroutineScope {
         val mediaTag = if (isMedia) "m" else ""
 
-        // TCP → WS
         val tcpToWs = launch(Dispatchers.IO) {
             try {
                 val buf = ByteArray(TCP_BUFFER_SIZE)
@@ -297,7 +308,6 @@ class WsBridge(
                     val n = input.read(buf)
                     if (n < 0) break
                     ProxyStats.addBytesUp(n.toLong())
-
                     val chunk = buf.copyOfRange(0, n)
                     if (splitter != null) {
                         val parts = splitter.split(chunk)
@@ -313,7 +323,6 @@ class WsBridge(
             }
         }
 
-        // WS → TCP
         val wsToTcp = launch(Dispatchers.IO) {
             try {
                 while (isActive) {
@@ -327,30 +336,20 @@ class WsBridge(
             }
         }
 
-        // Wait for either direction to finish
         select(tcpToWs, wsToTcp)
-
-        // Cancel the other
         tcpToWs.cancel()
         wsToTcp.cancel()
     }
 
-    /**
-     * Wait for the first of two jobs to complete.
-     */
     private suspend fun select(a: Job, b: Job) {
         try {
-            kotlinx.coroutines.selects.select<Unit> {
+            kotlinx.coroutines.selects.select {
                 a.onJoin {}
                 b.onJoin {}
             }
         } catch (_: CancellationException) {}
     }
 
-    /**
-     * TCP fallback: direct connection to the original Telegram DC IP.
-     * Used when WS is unavailable (302 redirect, timeout, etc.)
-     */
     private suspend fun tcpFallback(
         clientInput: InputStream,
         clientOutput: OutputStream,
@@ -370,11 +369,9 @@ class WsBridge(
                 val remoteOut = remote.getOutputStream()
                 val remoteIn = remote.getInputStream()
 
-                // Send the buffered init packet
                 remoteOut.write(initData)
                 remoteOut.flush()
 
-                // Bidirectional TCP ↔ TCP bridge
                 coroutineScope {
                     val up = launch {
                         try {

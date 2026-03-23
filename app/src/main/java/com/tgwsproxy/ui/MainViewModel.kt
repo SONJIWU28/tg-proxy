@@ -1,5 +1,4 @@
 package com.tgwsproxy.ui
-
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
@@ -9,14 +8,9 @@ import com.tgwsproxy.proxy.ProxyStats
 import com.tgwsproxy.vpn.TgVpnService
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
-
-    /** Whether the VPN is currently active */
     val isRunning: LiveData<Boolean> = MutableLiveData(false)
-
-    /** Real-time statistics */
     val stats: LiveData<ProxyStats.Snapshot> = ProxyStats.statsLive
 
-    /** Formatted uptime string */
     val uptimeText: LiveData<String> = stats.map { snapshot ->
         if (snapshot.startTimeMs == 0L) "—"
         else {
@@ -28,12 +22,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Formatted traffic strings */
     val trafficUp: LiveData<String> = stats.map { ProxyStats.formatBytes(it.bytesUp) }
     val trafficDown: LiveData<String> = stats.map { ProxyStats.formatBytes(it.bytesDown) }
     val trafficTotal: LiveData<String> = stats.map { ProxyStats.formatBytes(it.bytesTotal) }
 
-    /** Connection counts */
     val connectionsActive: LiveData<String> = stats.map { it.connectionsActive.toString() }
     val connectionsTotal: LiveData<String> = stats.map { it.connectionsTotal.toString() }
     val connectionsWs: LiveData<String> = stats.map { it.connectionsWs.toString() }
@@ -50,6 +42,5 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             TgVpnService.start(context)
         }
-        // State will be updated via refreshRunningState() from Activity
     }
 }

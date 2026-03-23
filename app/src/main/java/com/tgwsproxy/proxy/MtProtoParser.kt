@@ -1,5 +1,4 @@
 package com.tgwsproxy.proxy
-
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -7,54 +6,29 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-/**
- * MTProto obfuscated transport init packet parser.
- *
- * The Telegram client sends a 64-byte init packet when establishing a new
- * connection. This packet contains an AES-256-CTR encrypted header with:
- *   - bytes [8..40)  → AES key
- *   - bytes [40..56) → AES CTR IV (nonce)
- *   - bytes [56..64) → encrypted payload containing (proto_id, dc_id)
- *
- * We decrypt the last 8 bytes to extract the DC ID, which tells us
- * which WebSocket endpoint to connect to.
- */
 object MtProtoParser {
-
     private const val TAG = "MtProtoParser"
     private val ZERO_64 = ByteArray(64)
 
-    data class InitInfo(
-        val dc: Int,
-        val isMedia: Boolean
-    )
+    data class InitInfo(val dc: Int, val isMedia: Boolean)
 
-    /**
-     * Extract DC ID and media flag from a 64-byte MTProto obfuscation init packet.
-     * Returns null if the packet is invalid or cannot be parsed.
-     */
     fun extractDcFromInit(data: ByteArray): InitInfo? {
         if (data.size < 64) return null
-
         return try {
-            // Extract AES key and IV from the init packet
-            val aesKey = data.copyOfRange(8, 40)     // 32 bytes
-            val aesIv = data.copyOfRange(40, 56)      // 16 bytes
+            val aesKey = data.copyOfRange(8, 40)
+            val aesIv = data.copyOfRange(40, 56)
 
-            // Create AES-CTR cipher and generate keystream from zeros
             val cipher = Cipher.getInstance("AES/CTR/NoPadding")
             val keySpec = SecretKeySpec(aesKey, "AES")
             val ivSpec = IvParameterSpec(aesIv)
             cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec)
             val keystream = cipher.update(ZERO_64)
 
-            // XOR encrypted bytes [56..64) with keystream to get plaintext
             val plain = ByteArray(8)
             for (i in 0 until 8) {
                 plain[i] = (data[56 + i].toInt() xor keystream[56 + i].toInt()).toByte()
             }
 
-            // Parse plaintext: proto_id (uint32 LE) + dc_raw (int16 LE)
             val buf = ByteBuffer.wrap(plain).order(ByteOrder.LITTLE_ENDIAN)
             val protoId = buf.getInt(0).toLong() and 0xFFFFFFFFL
             val dcRaw = buf.getShort(4).toInt()
@@ -79,15 +53,8 @@ object MtProtoParser {
         }
     }
 
-    /**
-     * Patch dc_id in the 64-byte MTProto init packet.
-     *
-     * Mobile clients with useSecret=0 may leave bytes 60-61 as random.
-     * The WS relay needs a valid dc_id to route correctly, so we patch it.
-     */
     fun patchInitDc(data: ByteArray, dc: Int, isMedia: Boolean): ByteArray {
         if (data.size < 64) return data
-
         return try {
             val signedDc: Short = if (isMedia) (-dc).toShort() else dc.toShort()
             val newDcBytes = ByteBuffer.allocate(2)

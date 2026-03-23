@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TG WS Proxy</string>
+    <string name="vpn_description">Перенаправляет трафик Telegram через WebSocket-соединения для ускорения работы</string>
+</resources>

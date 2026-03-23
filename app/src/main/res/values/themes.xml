@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TgWsProxy" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/tg_blue</item>
+        <item name="colorPrimaryDark">@color/tg_blue_dark</item>
+        <item name="colorAccent">@color/tg_blue</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:statusBarColor">@color/tg_blue</item>
+        <item name="android:navigationBarColor">@color/background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
